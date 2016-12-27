@@ -7,7 +7,7 @@ import numpy as np
 import scipy.linalg
 import scipy.special
 import math
-from input_generator import InputGenerator
+from data_preprocessor import DataPreprocessor
 from sklearn import linear_model, svm
 import random
 from argparse import ArgumentParser
@@ -15,12 +15,20 @@ from scipy.stats import multivariate_normal
 
 
 class MultiClassLogistic:
-    def __init__(self, input_gen):
+    def __init__(self, input_gen, iter=None, elbo_thresh=0.1, prune_thresh=1e-4,
+                 max_iter=1000, a_0=1e-7, b_0=1e-8, verbose=True):
         """
         Accepts an input generator which has pre-processed the data
         into the correct format.
         """
         self.input_gen = input_gen
+        self.iter = iter
+        self.elbo_thresh = elbo_thresh
+        self.prune_thresh = prune_thresh
+        self.max_iter = max_iter
+        self.a_0 = a_0
+        self.b_0 = b_0
+        self.verbose = verbose
         # Extract the number of different classes in the label set.
         # Subtract one for identifiability.
         self.M = input_gen.enc.n_values_ -1
@@ -40,7 +48,7 @@ class MultiClassLogistic:
         E_p_y, E_p_w, E_p_a, E_q_w, E_q_a = 0, 0, 0, 0, 0
 
         ####### E_p_w
-        E_p_w = - (self.D * self.M /2) * np.log(2 * np.pi) - \
+        E_p_w = - (self.D * self.M / 2) * np.log(2 * np.pi) - \
                 0.5 * (np.trace(self.alpha.dot(self.V_N)) +
                        np.dot(np.dot(self.m_n.T, self.alpha.A), self.m_n).A1[0])
 
@@ -102,12 +110,10 @@ class MultiClassLogistic:
             matrix_values.append(np.diag(np.ones(self.D)) * float(self.a_0) / self.b_0)
         return scipy.sparse.block_diag(matrix_values)
 
-    def optimize_eb(self, a_0, b_0, threshold, iter=None, prune_thresh=1e-4, verbose=True):
+    def optimize_eb(self):
 
         # Initialize hyperparameters
         self.bounds = []
-        self.a_0 = a_0
-        self.b_0 = b_0
         self.m_0 = np.zeros(self.M * self.D)
 
         # Set A matrix (Bohning upper bound on lse)
@@ -145,16 +151,20 @@ class MultiClassLogistic:
             self.m_n = np.dot(self.V_N, temp_m_sum)
             self.alpha = self.update_ARD_matrix()
             bound =  self.lower_bound()
-            if verbose:
+            if self.verbose:
                 print "Iteration = ", count
                 print "bound = ", bound
             count += 1
-            if self.bounds and (abs((bound - self.bounds[-1])) < 0.1 or bound == float("inf")):
+            if self.iter is not None and self.iter == (count - 1):
+                break
+            if self.iter is None and (self.bounds and
+                                     (abs((bound - self.bounds[-1])) < self.elbo_thresh
+                                or bound == float("inf"))):
                 break
             self.bounds.append(bound)
 
         # Set the posterior mean to 0 if it is small enough.
-        self.m_n[1/np.diag(self.V_N) < prune_thresh] = 0
+        self.m_n[1/np.diag(self.V_N) < self.prune_thresh] = 0
 
     def predict(self, test_data, test_labels):
         # Since the posterior is now also a gaussian.
@@ -166,27 +176,41 @@ class MultiClassLogistic:
         for i in range(self.X.shape[0]/self.M):
             predictions_i = []
             for j in range(self.M + 1):
-            # This will predict y-hat from 21.166.
                 predict_mean = self.X[self.M * i:(i+1) * self.M] * self.m_n
+
                 predict_var = self.X[self.M * i:(i+1) * self.M] * self.V_N * \
-                              np.transpose(self.X[self.M * i:(i+1) * self.M]) + np.linalg.inv(self.A)
+                              np.transpose(self.X[self.M * i:(i+1) * self.M]) + \
+                              np.linalg.inv(self.A)
                 # Transform y-hat back to y
                 phi = self.X[self.M * i:(i+1) * self.M] * self.m_n
+
                 b_phi = self.A * phi - self.softmax(phi)
-                candidate_label = self.input_gen.enc.transform([[j]])[0][:,0:self.input_gen.enc.n_values_[0]-1]
+
+                candidate_label = \
+                    self.input_gen.enc.transform([[j]])[0] \
+                        [:,0:self.input_gen.enc.n_values_[0]-1]
+
                 y_hat = np.linalg.inv(self.A) * (b_phi + np.transpose(candidate_label))
-                c = 0.5 * np.transpose(phi) * self.A * phi - np.transpose(self.softmax(phi)) * phi + self.lse(phi)
+
+                c = 0.5 * np.transpose(phi) * self.A * phi - \
+                    np.transpose(self.softmax(phi)) * phi + self.lse(phi)
+
                 h_phi = np.sqrt(np.linalg.det(2 * np.pi * np.linalg.inv(self.A))) * \
                         np.exp(0.5 * np.transpose(y_hat) * self.A * y_hat - c)
+
                 posterior_prob = multivariate_normal(np.array(predict_mean).flatten(), predict_var)
+
                 predictions_i.append(h_phi * posterior_prob.pdf(np.squeeze(np.array(y_hat))))
+
             predictions.append(np.argmax(predictions_i))
         return predictions
 
 
     def misclassification_rate(self, features, labels):
         predictions = self.predict(features, labels)
-        assert len(labels) == len(predictions), "You have %d # of labels and %d # of predictions!" % (labels, predictions)
+        assert len(labels) == len(predictions), \
+            "You have %d # of labels and %d # of predictions!" % \
+            (labels, predictions)
         return 1 - sum(labels == predictions)/float(len(labels))
 
 
@@ -202,9 +226,26 @@ def parse_command_line():
                         help="The number of parameters in the synthetic dataset"
                              "that y is a function of (the rest would just be "
                              "noise variables).")
+    parser.add_argument("--elbo-thresh", type=float, default=0.1,
+                        help="The difference between successive ELBO values "
+                             "required to stop the VB iterations.")
     parser.add_argument("--prune-threshold", type=float, default=1e-4,
                         help="The weight threhsold for which to remove parameters after "
                              "performing ARD regularization.")
+    parser.add_argument("--iter", type=int,
+                        help="The number of iteration to run VB for. Replaces"
+                             "using the elbo threshold to stop optimizing.")
+    parser.add_argument("--a0", type=float, default=1e-8,
+                        help="Hyperparameter value for ARD. "
+                             "Lower values produce maximal sparsity of parameters.")
+    parser.add_argument("--b0", type=float, default=1e-8,
+                        help="Hyperparameter value for ARD. "
+                             "Lower values produce maximal sparsity of parameters.")
+    parser.add_argument("--max-iter", type=int, default=1000,
+                        help="The maximum allowable VB iterations.")
+    parser.add_argument("-v", "--verbose", default=True,
+                        help="Whether to print intermediate information during VB "
+                             "optimization process.")
     return parser.parse_args()
 
 
@@ -216,38 +257,32 @@ def parse_command_line():
 if __name__ == "__main__":
     np.random.seed(10)
     random.seed(10)
-    input_gen = InputGenerator()
-    inputs, targets, dep_indices, dep_weights = input_gen.load_dataset('iris')
-    train_index = random.sample(range(0, inputs.shape[0]), 2 * inputs.shape[0] / 3)
-    test_index = list(set(range(inputs.shape[0])).difference(train_index))
+    args = parse_command_line()
+    input_gen = DataPreprocessor()
+    inputs, targets, dep_indices, dep_weights = \
+        input_gen.load_dataset(args.dataset, args.synth_x_dim,
+                               args.synth_x_dep, args.synth_y_dim)
     train_index = random.sample(range(0, inputs.shape[0]), 2 * inputs.shape[0] / 3)
     test_index = list(set(range(inputs.shape[0])).difference(train_index))
     train_inputs = inputs[train_index, :]
     train_targets = targets[train_index,]
-    input_gen = InputGenerator(train_inputs, train_targets)
+    input_gen = DataPreprocessor(train_inputs, train_targets)
     print "loaded input_gen"
     input_gen.encode_labels()
     print "encoded y labels"
     input_gen.create_X_matrix()
     print "created X matrix"
-    mc_log = MultiClassLogistic(input_gen)
-    mc_log.optimize_eb(0.0000001,0.00000001, 0.01, 10)
+    mc_log = MultiClassLogistic(input_gen, args.iter, args.elbo_thresh, args.prune_threshold,
+                                args.max_iter, args.a0, args.b0, args.verbose)
+    mc_log.optimize_eb()
     print mc_log.misclassification_rate(inputs[test_index, :], targets[test_index])
 
     # Logistic regression
     logreg = linear_model.LogisticRegression(C=1e5)
-    logreg.fit(features[train_index,:], targets[train_index,])
-    predictions = logreg.predict(features[test_index,:])
-    print "misclassification rate = %f" % \
-          (1-(sum(targets[test_index,] == predictions)) /
-           float(len(targets[test_index,])))
-
-    clf = svm.SVC(gamma=0.001)
-    clf.fit(iris_features, iris_labels)
-    predictions = clf.predict(features[test_index,:])
-    print "misclassification rate = %f" % \
-          (1-(sum(targets[test_index,] == predictions)) /
-           float(len(targets[test_index,])))
+    logreg.fit(train_inputs, train_targets)
+    predictions = logreg.predict(inputs[test_index, :])
+    print "misclassification rate = %f" % (
+    1 - (sum(targets[test_index,] == predictions)) / float(len(targets[test_index,])))
 
 
 

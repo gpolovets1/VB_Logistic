@@ -3,7 +3,7 @@ import numpy as np
 from sklearn import datasets, preprocessing
 from scipy.sparse import csr_matrix
 
-class InputGenerator:
+class DataPreprocessor:
 
     def __init__(self, inputs=None, labels=None):
         self.labels = labels
@@ -36,7 +36,7 @@ class InputGenerator:
         dep_weights = [[np.random.normal(0, 1)
                         for _ in range(x_dep)] for __ in range(y_dim)]
 
-        y = [np.argmax(InputGenerator._class_linear_sums(
+        y = [np.argmax(DataPreprocessor._class_linear_sums(
             x[i], dep_weights, x_dep_indices)) for i in range(1000)]
         return np.array(x), np.array(y), x_dep_indices, dep_weights
 
@@ -69,7 +69,7 @@ class InputGenerator:
                                                [:, 0:self.enc.n_values_[0] - 1]]) \
                 if encoded_labels is not None else \
                 self.enc.transform([[label]])[0][:, 0:self.enc.n_values_[0] - 1]
-        self.labels = csr_matrix(encoded_labels)
+        self.labels = encoded_labels
 
     def create_X_matrix(self, input_data=None):
         # Generates a sparse matrix where each input datum of length D
