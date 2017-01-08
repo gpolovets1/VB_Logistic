@@ -1,3 +1,6 @@
+""" Able to load sample datasets form scikit-learn package or create synthetic datasets to train and evaluate on.
+    Also formats the raw data so that it can be ingested by the MultiClassLogistic object."""
+
 import scipy
 import numpy as np
 from sklearn import datasets, preprocessing
@@ -26,9 +29,12 @@ class DataPreprocessor:
         Creates a synthetic dataset where the response only depends on a subset
         of input variables.
         :param xdim: The dimension of the input.
-        :param x_dep: The number of input variables that the response depends on.
+        :param x_dep: The number of input variables that the response depends on. The rest of the variables
+        may be considered as noise.
         :param y_dim: The number of classes in the response.
-        :return:
+        :return: The synthetically generated inputs, labels, indices of non-noise variables, and the
+        weights that produce the outputs when multiplied by the non-noise input variables (a deterministic
+        equation of the outputs based off a linear combination of the non-noise input variables).
         """
         np.random.seed(0)
         x = [[np.random.normal(0, 1) for _ in range(xdim)] for __ in range(1000)]

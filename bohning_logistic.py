@@ -1,27 +1,33 @@
-# References
-# 1) Drugowitsch implementation: https://github.com/jdrugo/vb_logit/blob/master/vb_logit_fit_ard.m
-# 2) DRUGOWITSCH VB INFERENCE FOR LINEAR/LOGISTIC REGRESSION PDF
-# 3) Kevin Murphy ch. 21 & 7
+# Implementatino of Bayesian Multiclass Logistic Regression.
+# Variational Bayes is applied for learning the parameters.
+# ARD is used to regularize the classifier.
+
+# References:
+# 1) Jan Drugowitsch, Variational Bayesian inference for linear and logistic regression.
+#    arXiv preprint arXiv: arXiv:1310.5438
+# 2) Drugowitsch implementation: https://github.com/jdrugo/vb_logit/blob/master/vb_logit_fit_ard.m
+# 3) Murphy, Kevin P. Machine Learning: A Probabilistic Perspective. Cambridge, MA: MIT, 2012.
+#    Print. 234, 758-760
 
 import numpy as np
 import scipy.linalg
 import scipy.special
 import math
 from data_preprocessor import DataPreprocessor
-from sklearn import linear_model, svm
 import random
 from argparse import ArgumentParser
 from scipy.stats import multivariate_normal
 
 
 class MultiClassLogistic:
-    def __init__(self, input_gen, iter=None, elbo_thresh=0.1, prune_thresh=1e-4,
+    def __init__(self, data_prep, iter=None, elbo_thresh=0.1, prune_thresh=1e-4,
                  max_iter=1000, a_0=1e-7, b_0=1e-8, verbose=True):
         """
-        Accepts an input generator which has pre-processed the data
-        into the correct format.
+        Accepts an data pre-processor which has formatted the data for ingestion
+        by the classifier object. Hyperparameters settings may also be supplied
+        to the classifier object.
         """
-        self.input_gen = input_gen
+        self.data_prep = data_prep
         self.iter = iter
         self.elbo_thresh = elbo_thresh
         self.prune_thresh = prune_thresh
@@ -31,10 +37,10 @@ class MultiClassLogistic:
         self.verbose = verbose
         # Extract the number of different classes in the label set.
         # Subtract one for identifiability.
-        self.M = input_gen.enc.n_values_ -1
-        self.D = input_gen.D
-        self.X = input_gen.X
-        self.labels = input_gen.labels
+        self.M = data_prep.enc.n_values_ - 1
+        self.D = data_prep.D
+        self.X = data_prep.X
+        self.labels = data_prep.labels
 
     def lse(self, phi):
         return math.log(1 + sum(np.exp(phi_k) for phi_k in phi))
@@ -118,12 +124,12 @@ class MultiClassLogistic:
 
         # Set A matrix (Bohning upper bound on lse)
         self.A = 0.5 * (np.eye(self.M) - 1/(self.M + 1.0) *
-                        np.outer(np.ones(mc_log.M), np.ones(mc_log.M)))
+                        np.outer(np.ones(self.M), np.ones(self.M)))
 
         self.m_n = self.m_0 # The prior is set to be 0. Initialize m_n to the prior.
         self.alpha = self.initialize_ARD_matrix() # alpha is the prior on the precision matrix
 
-        # Run algorithm until convergence
+        # Run learning algorithm until convergence
         count = 0
         while True:
             self.phi = self.X.dot(self.m_n)
@@ -167,11 +173,11 @@ class MultiClassLogistic:
         self.m_n[1/np.diag(self.V_N) < self.prune_thresh] = 0
 
     def predict(self, test_data, test_labels):
-        # Since the posterior is now also a gaussian.
-        self.input_gen.create_X_matrix(test_data)
-        self.input_gen.encode_labels(test_labels)
-        self.X = self.input_gen.X
-        self.labels = self.input_gen.labels
+        # The posterior predictive is now also a Gaussian.
+        self.data_prep.create_X_matrix(test_data)
+        self.data_prep.encode_labels(test_labels)
+        self.X = self.data_prep.X
+        self.labels = self.data_prep.labels
         predictions = []
         for i in range(self.X.shape[0]/self.M):
             predictions_i = []
@@ -187,8 +193,8 @@ class MultiClassLogistic:
                 b_phi = self.A * phi - self.softmax(phi)
 
                 candidate_label = \
-                    self.input_gen.enc.transform([[j]])[0] \
-                        [:,0:self.input_gen.enc.n_values_[0]-1]
+                    self.data_prep.enc.transform([[j]])[0] \
+                        [:, 0:self.data_prep.enc.n_values_[0] - 1]
 
                 y_hat = np.linalg.inv(self.A) * (b_phi + np.transpose(candidate_label))
 
@@ -249,41 +255,28 @@ def parse_command_line():
     return parser.parse_args()
 
 
-
-
-
-
-
 if __name__ == "__main__":
     np.random.seed(10)
     random.seed(10)
     args = parse_command_line()
-    input_gen = DataPreprocessor()
+    data_prep = DataPreprocessor()
     inputs, targets, dep_indices, dep_weights = \
-        input_gen.load_dataset(args.dataset, args.synth_x_dim,
+        data_prep.load_dataset(args.dataset, args.synth_x_dim,
                                args.synth_x_dep, args.synth_y_dim)
     train_index = random.sample(range(0, inputs.shape[0]), 2 * inputs.shape[0] / 3)
     test_index = list(set(range(inputs.shape[0])).difference(train_index))
     train_inputs = inputs[train_index, :]
     train_targets = targets[train_index,]
-    input_gen = DataPreprocessor(train_inputs, train_targets)
+    data_prep = DataPreprocessor(train_inputs, train_targets)
     print "loaded input_gen"
-    input_gen.encode_labels()
+    data_prep.encode_labels()
     print "encoded y labels"
-    input_gen.create_X_matrix()
+    data_prep.create_X_matrix()
     print "created X matrix"
-    mc_log = MultiClassLogistic(input_gen, args.iter, args.elbo_thresh, args.prune_threshold,
+    mc_log = MultiClassLogistic(data_prep, args.iter, args.elbo_thresh, args.prune_threshold,
                                 args.max_iter, args.a0, args.b0, args.verbose)
     mc_log.optimize_eb()
     print mc_log.misclassification_rate(inputs[test_index, :], targets[test_index])
-
-    # Logistic regression
-    logreg = linear_model.LogisticRegression(C=1e5)
-    logreg.fit(train_inputs, train_targets)
-    predictions = logreg.predict(inputs[test_index, :])
-    print "misclassification rate = %f" % (
-    1 - (sum(targets[test_index,] == predictions)) / float(len(targets[test_index,])))
-
 
 
 
